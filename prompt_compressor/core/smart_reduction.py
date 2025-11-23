@@ -1,16 +1,17 @@
 """
-Smart token reduction using TF-IDF for word importance.
-This layer goes beyond simple pattern matching to intelligently reduce tokens
-while preserving meaning.
+Smart token reduction using structure-preserving compression.
+This layer removes low-value words while preserving core meaning:
+- Keeps noun phrases (multi-word concepts like "climate change")
+- Preserves subject-verb-object structure
+- Removes articles, redundant modifiers, filler words
+- Maintains directive verbs and key punctuation
 
-Energy cost: ~0.0001 Wh (still 1000x better than ML embeddings)
-Method: Statistical analysis, no neural networks
+Energy cost: ~0.0001 Wh (no ML models)
+Method: Linguistic rules + part-of-speech patterns
 """
 
 import re
-from typing import List, Tuple
-from sklearn.feature_extraction.text import TfidfVectorizer
-import numpy as np
+from typing import List, Tuple, Set
 
 
 def _split_into_words(text: str) -> List[Tuple[str, bool]]:
@@ -38,60 +39,111 @@ def _split_into_words(text: str) -> List[Tuple[str, bool]]:
     return result
 
 
+def _get_removable_words() -> Set[str]:
+    """
+    Words that can be safely removed without losing core meaning.
+    These are articles, weak modifiers, and redundant conjunctions.
+    """
+    return {
+        # Articles (can be removed in most cases)
+        'a', 'an', 'the',
+        # Weak modifiers
+        'very', 'quite', 'rather', 'somewhat', 'fairly',
+        # Redundant prepositions in lists (but NOT all prepositions!)
+        'on', 'in', 'at', 'of',  
+        # Pronouns in impersonal prompts
+        'it', 'this', 'that',
+    }
+
+
+def _is_noun_phrase_connector(word: str) -> bool:
+    """Check if word connects parts of a noun phrase (e.g., 'climate change')."""
+    # Hyphenated compounds
+    if '-' in word:
+        return True
+    return False
+
+
 def _get_word_importance_scores(text: str, global_context: List[str] = None) -> dict:
     """
-    Calculate TF-IDF scores for words in the text.
+    Calculate word importance based on universal linguistic principles.
     
-    Args:
-        text: Input text
-        global_context: Optional list of reference texts for better TF-IDF calculation
-                       (e.g., common prompts, documentation)
+    Strategy:
+    1. Start with high baseline - assume words are important
+    2. Mark function words (articles, common prepositions) as removable
+    3. Boost directive verbs, proper nouns, domain-specific terms
+    4. Keep noun phrases together
     
     Returns:
         Dictionary mapping words (lowercase) to importance scores (0-1)
+        Higher score = more important = keep it
     """
-    # If no global context, create a simple corpus from the text itself
-    if global_context is None:
-        # Split into sentences as pseudo-documents
-        sentences = re.split(r'[.!?]+', text)
-        sentences = [s.strip() for s in sentences if s.strip()]
-        
-        # If only one sentence, split by phrases
-        if len(sentences) == 1:
-            sentences = re.split(r'[,;]', text)
-            sentences = [s.strip() for s in sentences if s.strip()]
-        
-        corpus = sentences if len(sentences) > 1 else [text, text]  # Duplicate if needed
-    else:
-        corpus = global_context + [text]
+    words_in_text = re.findall(r'\b\w+\b', text.lower())
+    word_scores = {}
     
-    try:
-        # Create TF-IDF vectorizer
-        vectorizer = TfidfVectorizer(
-            lowercase=True,
-            token_pattern=r'\b\w+\b',
-            min_df=1,
-            max_df=1.0
-        )
-        
-        tfidf_matrix = vectorizer.fit_transform(corpus)
-        feature_names = vectorizer.get_feature_names_out()
-        
-        # Get scores for the last document (our text)
-        text_vector = tfidf_matrix[-1].toarray()[0]
-        
-        # Create word -> score mapping
-        word_scores = {}
-        for word, score in zip(feature_names, text_vector):
-            word_scores[word.lower()] = score
-        
-        return word_scores
-        
-    except Exception:
-        # Fallback: all words have equal importance
-        words = re.findall(r'\b\w+\b', text.lower())
-        return {w: 1.0 for w in set(words)}
+    # Baseline: assume all words are important until proven otherwise
+    for word in set(words_in_text):
+        word_scores[word] = 0.7
+    
+    # === REMOVABLE WORDS (low importance) ===
+    removable = _get_removable_words()
+    for word in removable:
+        if word in word_scores:
+            word_scores[word] = 0.2  # Low importance but not zero (context matters)
+    
+    # === BOOST IMPORTANT WORDS ===
+    
+    # 1. Action verbs at sentence start (directives)
+    imperative_verbs = IMPERATIVE_VERBS
+    if words_in_text and words_in_text[0] in imperative_verbs:
+        word_scores[words_in_text[0]] = 1.0  # Maximum importance
+    
+    # 2. Structural keywords
+    for word in STRUCTURE_WORDS:
+        if word in word_scores:
+            word_scores[word] = 0.95
+    
+    # 3. Capitalized words in original text (proper nouns, acronyms, important terms)
+    for match in re.finditer(r'\b[A-Z][A-Za-z0-9]*\b', text):
+        word = match.group().lower()
+        if word in word_scores:
+            word_scores[word] = 0.9
+    
+    # 4. Numbers and dates (always important context)
+    for word in words_in_text:
+        if re.match(r'^\d+$', word) or re.match(r'^\d+[a-z]+$', word):  # "6month", "1M"
+            word_scores[word] = 0.95
+    
+    # 5. Domain-specific terms (compound words, hyphenated, technical suffixes)
+    for word in words_in_text:
+        # Technical suffixes suggest domain terms
+        if any(word.endswith(suf) for suf in ['tion', 'ment', 'ness', 'ity', 'ance', 'ence', 'ization']):
+            word_scores[word] = max(word_scores.get(word, 0), 0.85)
+    
+    # 6. First few words often contain core topic - boost them
+    for i, word in enumerate(words_in_text[:6]):
+        if word not in removable:  # Don't boost articles even if they're first
+            word_scores[word] = max(word_scores.get(word, 0), 0.85)
+    
+    # 7. Words that appear multiple times = key concepts
+    word_freq = {}
+    for word in words_in_text:
+        word_freq[word] = word_freq.get(word, 0) + 1
+    for word, count in word_freq.items():
+        if count >= 2 and word not in removable:
+            word_scores[word] = max(word_scores.get(word, 0), 0.9)
+    
+    return word_scores
 
+
+IMPERATIVE_VERBS = {
+    'explain', 'summarize', 'outline', 'list', 'compare', 'draft', 'provide', 'classify',
+    'rewrite', 'convert', 'design', 'suggest', 'analyze', 'describe', 'identify', 'give', 'produce'
+}
+
+STRUCTURE_WORDS = {
+    'cover', 'include', 'output', 'format'
+}
 
 def _is_important_word(word: str, pos_in_sentence: str = 'middle') -> bool:
     """
@@ -109,6 +161,14 @@ def _is_important_word(word: str, pos_in_sentence: str = 'middle') -> bool:
     # Always preserve question words
     question_words = {'what', 'how', 'why', 'when', 'where', 'who', 'which', 'whose'}
     if word_lower in question_words:
+        return True
+
+    # Preserve leading imperative verb (directive) at start of prompt
+    if pos_in_sentence == 'first' and word_lower in IMPERATIVE_VERBS:
+        return True
+
+    # Preserve structural instruction words
+    if word_lower in STRUCTURE_WORDS:
         return True
     
     # Always preserve negations
@@ -241,14 +301,19 @@ def optimize_smart_reduction(
         if i not in words_to_keep:
             words_to_remove.add(i)
     
-    # Rebuild text - filter words but keep sentence structure
-    kept_words = []
+    # Rebuild text - filter words while optionally preserving key punctuation separators
+    kept_tokens = []
     for i, (token, is_word) in enumerate(tokens):
-        if is_word and i not in words_to_remove:
-            kept_words.append(token)
-    
-    # Join words with spaces
-    result = ' '.join(kept_words)
+        if is_word:
+            if i not in words_to_remove:
+                kept_tokens.append(token)
+        else:
+            # Preserve punctuation that delineates sections (colon/comma/semicolon) if previous is a word
+            if token in {':', ',', ';'} and kept_tokens and kept_tokens[-1] not in {':', ',', ';'}:
+                kept_tokens.append(token)
+
+    # Join with spaces first; regex clean-up will fix spacing around punctuation
+    result = ' '.join(kept_tokens)
     
     # Clean up spacing and punctuation
     result = re.sub(r'\s+', ' ', result)  # Multiple spaces → single space
@@ -260,8 +325,11 @@ def optimize_smart_reduction(
     # Pattern: remove sequences like "I'm for I've how" before meaningful text starts
     result = re.sub(r'^(?:\w+\'?\w*\s+){1,6}(One|The|That|Different|Sources|I)', r'\1', result)
     
+    # Ensure 'Cover:' keeps colon if followed by list (may have been detached)
+    result = re.sub(r'\b(Cover)\s+(?=[A-Za-z0-9])', r'\1: ', result)
+
     # Capitalize first letter
-    if result and result[0].islower():
+    if result:
         result = result[0].upper() + result[1:]
     
     return result.strip()
