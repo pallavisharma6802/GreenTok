@@ -1,6 +1,6 @@
 
 
-# C4Prompt  *Compress Context Cut Costs*
+# C4Prompt : *Compress Context Cut Costs*
 
 ## Why We Built This
 
