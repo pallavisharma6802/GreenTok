@@ -1,6 +1,6 @@
 
 
-# GreenTok
+# C4Prompt  *Compress Context Cut Costs*
 
 ## Why We Built This
 
